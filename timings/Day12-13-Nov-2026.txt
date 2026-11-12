@@ -1,0 +1,5 @@
+30 min revise docker
+30 min revise k8s
+1 hr read books
+1 hr revise aws
+
