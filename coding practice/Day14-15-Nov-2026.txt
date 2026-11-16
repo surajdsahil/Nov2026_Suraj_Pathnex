@@ -1,0 +1,217 @@
+
+# DAY 14 — KUBERNETES ADVANCED CONCEPTS & MULTI-ENVIRONMENT DEPLOYMENTS
+
+File: nginx-setup.yml
+
+```yaml
+---
+- name: Setup Nginx with Reverse Proxy
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Configure nginx as reverse proxy
+      ansible.builtin.template:
+        src: reverse-proxy.conf.j2
+        dest: /etc/nginx/conf.d/reverse-proxy.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart nginx
+
+    - name: Ensure nginx is enabled and running
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+```
+
+File: reverse-proxy.conf.j2
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+
+File: main.tf
+
+```hcl
+resource "aws_s3_bucket" "pathnex_log_bucket" {
+  bucket = "pathnex-log-bucket-unique-12345"
+}
+
+resource "aws_s3_bucket" "pathnex_bucket" {
+  bucket = "pathnex-bucket-unique-12345"
+}
+
+resource "aws_s3_bucket_versioning" "versioning" {
+  bucket = aws_s3_bucket.pathnex_bucket.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_ownership_controls" "log_ownership" {
+  bucket = aws_s3_bucket.pathnex_log_bucket.id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_logging" "logging" {
+  bucket        = aws_s3_bucket.pathnex_bucket.id
+  target_bucket = aws_s3_bucket.pathnex_log_bucket.id
+  target_prefix = "logs/"
+
+  depends_on = [
+    aws_s3_bucket_ownership_controls.log_ownership
+  ]
+}
+```
+
+
+File: ingress.yaml
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+
+metadata:
+  name: pathnex-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+
+spec:
+  ingressClassName: nginx
+
+  rules:
+    - host: pathnex.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pathnex-service
+                port:
+                  number: 80
+
+File: Jenkinsfile
+
+```groovy
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+                echo 'Building Docker image...'
+                sh 'docker build -t pathnex-web-app:latest .'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running tests...'
+                sh 'echo "Add your actual test command here"'
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                echo 'Deploying application...'
+                sh 'kubectl apply -f kubernetes/deployment.yaml'
+            }
+        }
+    }
+}
+```
+
+File: .gitlab-ci.yml
+
+```yaml
+stages:
+  - build
+  - push
+  - deploy
+
+variables:
+  IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+build:
+  stage: build
+  script:
+    - docker build -t "$IMAGE_TAG" .
+
+push:
+  stage: push
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker push "$IMAGE_TAG"
+
+deploy:
+  stage: deploy
+  script:
+    - >
+      helm upgrade --install pathnex-nginx ./helm-chart
+      --set image.repository="$CI_REGISTRY_IMAGE"
+      --set image.tag="$CI_COMMIT_SHORT_SHA"
+  only:
+    - main
+
+File: Dockerfile
+
+```dockerfile
+FROM ubuntu
+
+ENTRYPOINT ["echo"]
+
+CMD ["Hello Pathnex"]
+```
+
+Build and run:
+
+```bash
+docker build -t pathnex-demo .
+docker run pathnex-demo
+```
+
+Output:
+
+Hello Pathnex
+
+Override CMD:
+
+```bash
+docker run pathnex-demo "Hello DevOps"
+```
+
+Output:
+
+Hello DevOps
+
+
