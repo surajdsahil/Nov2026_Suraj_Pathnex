@@ -1,0 +1,216 @@
+
+# ANSIBLE
+
+---
+- name: Deploy web application to multiple hosts
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Install Apache
+      apt:
+        name: apache2
+        state: present
+        update_cache: yes
+
+    - name: Create web directory
+      file:
+        path: /var/www/html
+        state: directory
+        mode: '0755'
+
+    - name: Copy web application files
+      copy:
+        src: /path/to/web/app/
+        dest: /var/www/html/
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Start and enable Apache
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+
+# TERRAFORM
+
+resource "aws_lb" "pathnex_lb" {
+  name               = "pathnex-lb"
+  internal           = false
+  load_balancer_type = "application"
+
+  security_groups = [aws_security_group.allow_ssh_http.id]
+
+  subnets = [
+    aws_subnet.public_1.id,
+    aws_subnet.public_2.id
+  ]
+
+  tags = {
+    Name = "Pathnex-ALB"
+  }
+}
+
+resource "aws_lb_target_group" "pathnex_tg" {
+  name     = "pathnex-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    path = "/"
+    port = "traffic-port"
+  }
+}
+
+resource "aws_instance" "pathnex_ec2" {
+  ami           = "ami-REPLACE_WITH_VALID_AMI"
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public_1.id
+
+  vpc_security_group_ids = [
+    aws_security_group.allow_ssh_http.id
+  ]
+
+  tags = {
+    Name = "Pathnex-EC2"
+  }
+}
+
+resource "aws_lb_target_group_attachment" "pathnex_attachment" {
+  target_group_arn = aws_lb_target_group.pathnex_tg.arn
+  target_id        = aws_instance.pathnex_ec2.id
+  port             = 80
+}
+
+resource "aws_lb_listener" "pathnex_listener" {
+  load_balancer_arn = aws_lb.pathnex_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.pathnex_tg.arn
+  }
+}
+
+
+# KUBERNETES HELM
+
+helm repo add bitnami https://charts.bitnami.com/bitnami
+
+helm repo update
+
+helm install pathnex-redis bitnami/redis \
+  --set persistence.enabled=true \
+  --set persistence.size=8Gi
+
+helm list
+kubectl get pods
+kubectl get pvc
+kubectl get svc
+
+
+# JENKINSFILE
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['dev', 'production'],
+            description: 'Select deployment environment'
+        )
+    }
+
+    environment {
+        IMAGE_NAME = 'pathnex-web-app'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    docker.build("${IMAGE_NAME}")
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running application tests...'
+                sh 'echo "Tests completed successfully"'
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    if (params.DEPLOY_ENV == 'production') {
+                        sh 'kubectl apply -f kubernetes/prod-deployment.yaml'
+                    } else {
+                        sh 'kubectl apply -f kubernetes/dev-deployment.yaml'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
+
+
+# GITLAB CI/CD
+
+stages:
+  - build
+  - push
+  - deploy
+
+variables:
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+build:
+  stage: build
+  script:
+    - docker build -t "$IMAGE_NAME" .
+
+push:
+  stage: push
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker push "$IMAGE_NAME"
+
+deploy:
+  stage: deploy
+  script:
+    - |
+      if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
+        kubectl apply -f kubernetes/prod-deployment.yaml
+      else
+        kubectl apply -f kubernetes/dev-deployment.yaml
+      fi
+
+
+# DOCKERFILE
+
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y curl vim && \
+    rm -rf /var/lib/apt/lists/*
+
+CMD ["echo", "Hello Pathnex"]
+
