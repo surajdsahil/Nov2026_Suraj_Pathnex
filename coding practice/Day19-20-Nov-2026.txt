@@ -1,0 +1,223 @@
+# ANSIBLE 
+
+- name: Install Prometheus Monitoring
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Install EPEL repository
+      yum:
+        name: epel-release
+        state: present
+
+    - name: Install Prometheus and Node Exporter
+      yum:
+        name:
+          - prometheus
+          - golang-github-prometheus-node-exporter
+        state: present
+
+    - name: Start Node Exporter
+      service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: yes
+
+    - name: Start Prometheus
+      service:
+        name: prometheus
+        state: started
+        enabled: yes
+
+
+# TERRAFORM 
+
+resource "aws_cloudwatch_log_group" "pathnex_log_group" {
+  name              = "pathnex-log-group"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_log_stream" "pathnex_log_stream" {
+  name           = "pathnex-log-stream"
+  log_group_name = aws_cloudwatch_log_group.pathnex_log_group.name
+}
+
+
+# KUBERNETES 
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+data:
+  fluent.conf: |
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+
+    <match **>
+      @type stdout
+    </match>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluentd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluentd
+  template:
+    metadata:
+      labels:
+        app: fluentd
+    spec:
+      containers:
+        - name: fluentd
+          image: fluent/fluentd:v1.16-debian-1
+          ports:
+            - containerPort: 24224
+              name: forward
+          volumeMounts:
+            - name: fluentd-config
+              mountPath: /fluentd/etc/fluent.conf
+              subPath: fluent.conf
+      volumes:
+        - name: fluentd-config
+          configMap:
+            name: fluentd-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluentd
+spec:
+  selector:
+    app: fluentd
+  ports:
+    - name: forward
+      protocol: TCP
+      port: 24224
+      targetPort: 24224
+
+
+# JENKINSFILE — BUILD, TEST AND MONITOR DEPLOYMENT
+
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    def appImage = docker.build('pathnex-web-app')
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running application tests...'
+                sh 'python -m compileall .'
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sh 'kubectl apply -f kubernetes/deployment.yaml'
+                sh 'kubectl rollout status deployment/pathnex-web-app --timeout=120s'
+            }
+        }
+
+        stage('Monitor Deployment') {
+            steps {
+                sh 'kubectl get pods'
+                sh 'kubectl get services'
+            }
+        }
+    }
+}
+
+
+# GITLAB CI/CD — BUILD, PUSH AND DEPLOY
+
+
+stages:
+  - build
+  - push
+  - deploy
+
+variables:
+  IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+build:
+  stage: build
+  script:
+    - docker build -t "$IMAGE_TAG" .
+
+push:
+  stage: push
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker push "$IMAGE_TAG"
+
+deploy:
+  stage: deploy
+  script:
+    - kubectl apply -f kubernetes/deployment.yaml
+    - kubectl rollout status deployment/pathnex-web-app --timeout=120s
+    - kubectl get pods
+    - kubectl get services
+
+
+
+# DOCKER — FLASK APPLICATION
+
+
+# app.py
+
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Hello Pathnex"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+
+# requirements.txt
+
+Flask==3.1.1
+
+
+# Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /opt/pathnex/flask-app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]
+
+
+# DOCKER 
+
+docker build -t pathnex-flask-app .
+docker run -d --name pathnex-flask-container -p 5000:5000 pathnex-flask-app
+docker ps
+docker logs pathnex-flask-container
+
