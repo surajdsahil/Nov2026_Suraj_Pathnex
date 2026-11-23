@@ -1,0 +1,294 @@
+
+# Day 22 — Multi-Cluster Kubernetes Management
+
+## 1. Ansible — Deploy Nginx Across Multiple Kubernetes Clusters
+
+---
+- name: Deploy Nginx across multiple Kubernetes clusters
+  hosts: localhost
+  connection: local
+  become: no
+
+  tasks:
+
+    - name: Check Cluster 1 connection
+      command: kubectl --context=us-east-cluster cluster-info
+      register: cluster1_status
+      changed_when: false
+
+    - name: Deploy Nginx on Cluster 1
+      command: kubectl --context=us-east-cluster apply -f kubernetes/deployment.yaml
+
+    - name: Check Cluster 2 connection
+      command: kubectl --context=us-west-cluster cluster-info
+      register: cluster2_status
+      changed_when: false
+
+    - name: Deploy Nginx on Cluster 2
+      command: kubectl --context=us-west-cluster apply -f kubernetes/deployment.yaml
+
+    - name: Verify Cluster 1 deployment
+      command: kubectl --context=us-east-cluster get deployments
+
+    - name: Verify Cluster 2 deployment
+      command: kubectl --context=us-west-cluster get deployments
+
+---
+
+## 2. Terraform — Multi-Region Kubernetes Clusters with EKS and GKE
+
+# AWS Provider
+provider "aws" {
+  region = "us-east-1"
+}
+
+# Google Cloud Provider
+provider "google" {
+  project = var.gcp_project_id
+  region  = "us-central1"
+}
+
+# Variables
+variable "gcp_project_id" {
+  description = "Google Cloud Project ID"
+  type        = string
+}
+
+variable "gcp_region" {
+  default = "us-central1"
+}
+
+# AWS IAM Role for EKS
+resource "aws_iam_role" "eks_cluster_role" {
+  name = "pathnex-eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+# Attach EKS Cluster Policy
+resource "aws_iam_role_policy_attachment" "eks_cluster_role_policy" {
+  role       = aws_iam_role.eks_cluster_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+# AWS EKS Cluster
+resource "aws_eks_cluster" "pathnex_eks" {
+  name     = "pathnex-eks-cluster"
+  role_arn = aws_iam_role.eks_cluster_role.arn
+  version  = "1.33"
+
+  vpc_config {
+    subnet_ids = var.eks_subnet_ids
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_role_policy
+  ]
+}
+
+# EKS Subnet IDs
+variable "eks_subnet_ids" {
+  description = "Existing subnet IDs for EKS"
+  type        = list(string)
+}
+
+# Google GKE Cluster
+resource "google_container_cluster" "pathnex_gke" {
+  name     = "pathnex-gke-cluster"
+  location = "us-central1"
+
+  initial_node_count = 3
+
+  node_config {
+    machine_type = "e2-medium"
+
+    oauth_scopes = [
+      "https://www.googleapis.com/auth/cloud-platform"
+    ]
+  }
+
+  deletion_protection = false
+}
+
+---
+
+## 3. Kubernetes — Multi-Cluster Deployment
+
+# File: kubernetes/deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: pathnex-deployment
+
+spec:
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: pathnex-app
+
+  template:
+    metadata:
+      labels:
+        app: pathnex-app
+
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+
+          ports:
+            - containerPort: 80
+
+---
+
+## 4. Jenkinsfile — Multi-Cluster Deployment Strategy
+
+pipeline {
+
+    agent any
+
+    stages {
+
+        stage('Check Kubernetes Clusters') {
+            steps {
+                sh '''
+                    kubectl --context=us-east-cluster cluster-info
+                    kubectl --context=us-west-cluster cluster-info
+                '''
+            }
+        }
+
+        stage('Deploy to Cluster 1') {
+            steps {
+                echo 'Deploying Nginx to US East Cluster'
+
+                sh '''
+                    kubectl --context=us-east-cluster \
+                    apply -f kubernetes/deployment.yaml
+                '''
+            }
+        }
+
+        stage('Deploy to Cluster 2') {
+            steps {
+                echo 'Deploying Nginx to US West Cluster'
+
+                sh '''
+                    kubectl --context=us-west-cluster \
+                    apply -f kubernetes/deployment.yaml
+                '''
+            }
+        }
+
+        stage('Verify Deployments') {
+            steps {
+                sh '''
+                    kubectl --context=us-east-cluster \
+                    get deployments
+
+                    kubectl --context=us-west-cluster \
+                    get deployments
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Multi-cluster deployment successful!'
+        }
+
+        failure {
+            echo 'Multi-cluster deployment failed!'
+        }
+    }
+}
+
+---
+
+## 5. GitLab CI/CD — Multi-Cluster Deployment Strategy
+
+stages:
+  - check
+  - deploy
+  - verify
+
+# Check Cluster Connections
+check_clusters:
+  stage: check
+
+  script:
+    - kubectl --context=us-east-cluster cluster-info
+    - kubectl --context=us-west-cluster cluster-info
+
+# Deploy to Cluster 1
+deploy_cluster_1:
+  stage: deploy
+
+  script:
+    - kubectl --context=us-east-cluster apply -f kubernetes/deployment.yaml
+
+# Deploy to Cluster 2
+deploy_cluster_2:
+  stage: deploy
+
+  script:
+    - kubectl --context=us-west-cluster apply -f kubernetes/deployment.yaml
+
+# Verify Deployments
+verify_deployments:
+  stage: verify
+
+  script:
+    - kubectl --context=us-east-cluster get deployments
+    - kubectl --context=us-west-cluster get deployments
+
+---
+
+## 6. Docker — Docker Compose with MySQL and Nginx
+
+services:
+
+  db:
+    image: mysql:8.0
+
+    container_name: pathnex-db
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: pathnex_db
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    restart: always
+
+  web:
+    image: nginx:latest
+
+    container_name: pathnex-web
+
+    ports:
+      - "80:80"
+
+    depends_on:
+      - db
+
+    restart: always
+
+volumes:
+  mysql_data:
+
+
