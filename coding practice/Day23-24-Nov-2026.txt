@@ -1,0 +1,369 @@
+
+# Day 23 — Serverless Architecture and Microservices
+
+## 1. Ansible — Deploy Lambda Functions Using AWS CLI
+
+---
+- name: Deploy AWS Lambda Function
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    function_name: pathnex-lambda
+    lambda_role: arn:aws:iam::123456789012:role/lambda-execution-role
+    runtime: python3.12
+    handler: lambda_function.lambda_handler
+
+  tasks:
+
+    - name: Create Lambda deployment package
+      archive:
+        path: lambda_function.py
+        dest: lambda.zip
+        format: zip
+
+    - name: Check if Lambda function exists
+      command: aws lambda get-function --function-name {{ function_name }}
+      register: lambda_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create Lambda function
+      command: >
+        aws lambda create-function
+        --function-name {{ function_name }}
+        --runtime {{ runtime }}
+        --role {{ lambda_role }}
+        --handler {{ handler }}
+        --zip-file fileb://lambda.zip
+      when: lambda_check.rc != 0
+
+    - name: Update existing Lambda function
+      command: >
+        aws lambda update-function-code
+        --function-name {{ function_name }}
+        --zip-file fileb://lambda.zip
+      when: lambda_check.rc == 0
+
+    - name: Verify Lambda deployment
+      command: aws lambda get-function --function-name {{ function_name }}
+      changed_when: false
+
+---
+
+## 2. Terraform — Serverless API Gateway with Lambda Integration
+
+# AWS Provider
+provider "aws" {
+  region = "us-east-1"
+}
+
+# IAM Role for Lambda
+resource "aws_iam_role" "lambda_exec_role" {
+  name = "pathnex-lambda-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [{
+      Effect = "Allow"
+
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+# Attach CloudWatch Logging Permissions
+resource "aws_iam_role_policy_attachment" "lambda_logs" {
+  role = aws_iam_role.lambda_exec_role.name
+
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# Lambda Function
+resource "aws_lambda_function" "pathnex_lambda" {
+  function_name = "pathnex-lambda"
+
+  runtime = "python3.12"
+
+  role = aws_iam_role.lambda_exec_role.arn
+
+  handler = "lambda_function.lambda_handler"
+
+  filename = "lambda.zip"
+
+  source_code_hash = filebase64sha256("lambda.zip")
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_logs
+  ]
+}
+
+# API Gateway REST API
+resource "aws_api_gateway_rest_api" "pathnex_api" {
+  name        = "pathnex-api"
+  description = "Pathnex Serverless API"
+}
+
+# API Gateway Resource
+resource "aws_api_gateway_resource" "pathnex_resource" {
+  rest_api_id = aws_api_gateway_rest_api.pathnex_api.id
+
+  parent_id = aws_api_gateway_rest_api.pathnex_api.root_resource_id
+
+  path_part = "hello"
+}
+
+# API Gateway Method
+resource "aws_api_gateway_method" "pathnex_method" {
+  rest_api_id = aws_api_gateway_rest_api.pathnex_api.id
+
+  resource_id = aws_api_gateway_resource.pathnex_resource.id
+
+  http_method = "GET"
+
+  authorization = "NONE"
+}
+
+# Lambda Integration
+resource "aws_api_gateway_integration" "lambda_integration" {
+  rest_api_id = aws_api_gateway_rest_api.pathnex_api.id
+
+  resource_id = aws_api_gateway_resource.pathnex_resource.id
+
+  http_method = aws_api_gateway_method.pathnex_method.http_method
+
+  integration_http_method = "POST"
+
+  type = "AWS_PROXY"
+
+  uri = aws_lambda_function.pathnex_lambda.invoke_arn
+}
+
+# Allow API Gateway to Invoke Lambda
+resource "aws_lambda_permission" "api_gateway_permission" {
+  statement_id = "AllowAPIGatewayInvoke"
+
+  action = "lambda:InvokeFunction"
+
+  function_name = aws_lambda_function.pathnex_lambda.function_name
+
+  principal = "apigateway.amazonaws.com"
+
+  source_arn = "${aws_api_gateway_rest_api.pathnex_api.execution_arn}/*/*"
+}
+
+# API Gateway Deployment
+resource "aws_api_gateway_deployment" "pathnex_deployment" {
+  rest_api_id = aws_api_gateway_rest_api.pathnex_api.id
+
+  depends_on = [
+    aws_api_gateway_integration.lambda_integration
+  ]
+
+  triggers = {
+    redeployment = sha1(jsonencode([
+      aws_api_gateway_resource.pathnex_resource.id,
+      aws_api_gateway_method.pathnex_method.id,
+      aws_api_gateway_integration.lambda_integration.id
+    ]))
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# API Gateway Stage
+resource "aws_api_gateway_stage" "pathnex_stage" {
+  deployment_id = aws_api_gateway_deployment.pathnex_deployment.id
+
+  rest_api_id = aws_api_gateway_rest_api.pathnex_api.id
+
+  stage_name = "prod"
+}
+
+# API URL
+output "api_url" {
+  value = "${aws_api_gateway_stage.pathnex_stage.invoke_url}/hello"
+}
+
+---
+
+## 3. Kubernetes — Deploy Microservices Using Helm
+
+# Create Helm Chart
+helm create microservice-chart
+
+# Install Microservice
+helm install pathnex-microservice ./microservice-chart
+
+# Check Helm Release
+helm list
+
+# Check Kubernetes Pods
+kubectl get pods
+
+# Upgrade Microservice
+helm upgrade pathnex-microservice ./microservice-chart
+
+# Rollback Deployment
+helm rollback pathnex-microservice 1
+
+# Uninstall Microservice
+helm uninstall pathnex-microservice
+
+---
+
+## 4. Jenkinsfile — Deploy Serverless Applications with Lambda
+
+pipeline {
+
+    agent any
+
+    environment {
+        FUNCTION_NAME = 'pathnex-lambda'
+    }
+
+    stages {
+
+        stage('Build') {
+            steps {
+                echo 'Building Lambda function...'
+
+                sh '''
+                    cd lambda
+                    zip -r ../lambda.zip .
+                '''
+            }
+        }
+
+        stage('Validate Package') {
+            steps {
+                sh '''
+                    unzip -l lambda.zip
+                '''
+            }
+        }
+
+        stage('Deploy to AWS Lambda') {
+            steps {
+                echo 'Deploying Lambda function...'
+
+                sh '''
+                    aws lambda update-function-code \
+                    --function-name $FUNCTION_NAME \
+                    --zip-file fileb://lambda.zip
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    aws lambda get-function \
+                    --function-name $FUNCTION_NAME
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Lambda deployment successful!'
+        }
+
+        failure {
+            echo 'Lambda deployment failed!'
+        }
+    }
+}
+
+---
+
+## 5. GitLab CI/CD — Deploy Lambda Function
+
+stages:
+  - build
+  - deploy
+  - verify
+
+# Build Lambda Package
+build:
+  stage: build
+
+  script:
+    - cd lambda
+    - zip -r ../lambda.zip .
+
+  artifacts:
+    paths:
+      - lambda.zip
+    expire_in: 1 day
+
+# Deploy Lambda Function
+deploy:
+  stage: deploy
+
+  needs:
+    - job: build
+      artifacts: true
+
+  script:
+    - aws lambda update-function-code --function-name pathnex-lambda --zip-file fileb://lambda.zip
+
+# Verify Lambda Deployment
+verify:
+  stage: verify
+
+  script:
+    - aws lambda get-function --function-name pathnex-lambda
+
+---
+
+## 6. Docker — Multi-Stage Docker Build
+
+# Stage 1 — Build Stage
+FROM maven:3.9-eclipse-temurin-17 AS builder
+
+# Set Working Directory
+WORKDIR /opt/pathnex/java-build
+
+# Copy Project Files
+COPY pom.xml .
+
+COPY src ./src
+
+# Build Java Application
+RUN mvn clean package -DskipTests
+
+# Stage 2 — Production Stage
+FROM tomcat:9-jdk17-temurin
+
+# Set Production Directory
+WORKDIR /usr/local/tomcat/webapps
+
+# Copy WAR File from Build Stage
+COPY --from=builder /opt/pathnex/java-build/target/*.war ./ROOT.war
+
+# Expose Application Port
+EXPOSE 8080
+
+# Start Tomcat Server
+CMD ["catalina.sh", "run"]
+
+
+# Real Paths:
+
+# Build Stage:
+# /opt/pathnex/java-build
+
+# Production Stage:
+# /usr/local/tomcat/webapps
+
+
