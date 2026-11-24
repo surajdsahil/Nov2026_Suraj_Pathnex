@@ -1,0 +1,291 @@
+
+# Day 21 — Disaster Recovery and Backup Strategies
+
+## 1. Ansible — Backup and Restore Files
+
+---
+- name: Backup and Restore Files
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Create backup of /etc directory
+      archive:
+        path: /etc
+        dest: /tmp/etc-backup.tar.gz
+        format: gz
+
+    - name: Copy backup to another server
+      fetch:
+        src: /tmp/etc-backup.tar.gz
+        dest: /tmp/backup/
+        flat: yes
+
+    - name: Restore backup
+      unarchive:
+        src: /tmp/etc-backup.tar.gz
+        dest: /
+        remote_src: yes
+
+---
+
+## 2. Terraform — S3 Bucket with Cross-Region Replication
+
+# Provider 1
+provider "aws" {
+  alias  = "us"
+  region = "us-east-1"
+}
+
+# Provider 2
+provider "aws" {
+  alias  = "eu"
+  region = "eu-west-1"
+}
+
+# Primary S3 Bucket
+resource "aws_s3_bucket" "primary" {
+  provider = aws.us
+  bucket   = "pathnex-backup-bucket"
+}
+
+# Destination S3 Bucket
+resource "aws_s3_bucket" "backup" {
+  provider = aws.eu
+  bucket   = "pathnex-backup-bucket-eu"
+}
+
+# Enable versioning on primary bucket
+resource "aws_s3_bucket_versioning" "primary" {
+  provider = aws.us
+  bucket   = aws_s3_bucket.primary.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Enable versioning on destination bucket
+resource "aws_s3_bucket_versioning" "backup" {
+  provider = aws.eu
+  bucket   = aws_s3_bucket.backup.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# IAM Role for Replication
+resource "aws_iam_role" "replication" {
+  name = "s3-replication-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "s3.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+# Replication Policy
+resource "aws_iam_role_policy" "replication" {
+  role = aws_iam_role.replication.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:GetReplicationConfiguration",
+        "s3:ListBucket"
+      ]
+      Resource = aws_s3_bucket.primary.arn
+    },
+    {
+      Effect = "Allow"
+      Action = [
+        "s3:GetObjectVersionForReplication",
+        "s3:GetObjectVersionAcl",
+        "s3:ReplicateObject",
+        "s3:ReplicateDelete",
+        "s3:ReplicateTags"
+      ]
+      Resource = "${aws_s3_bucket.primary.arn}/*"
+    }]
+  })
+}
+
+# Configure Cross-Region Replication
+resource "aws_s3_bucket_replication_configuration" "replication" {
+  provider = aws.us
+
+  depends_on = [
+    aws_s3_bucket_versioning.primary,
+    aws_s3_bucket_versioning.backup,
+    aws_iam_role_policy.replication
+  ]
+
+  role   = aws_iam_role.replication.arn
+  bucket = aws_s3_bucket.primary.id
+
+  rule {
+    id     = "backup-replication"
+    status = "Enabled"
+
+    filter {}
+
+    destination {
+      bucket = aws_s3_bucket.backup.arn
+    }
+  }
+}
+
+# Upload Backup File
+resource "aws_s3_object" "backup_file" {
+  provider = aws.us
+  bucket   = aws_s3_bucket.primary.id
+  key      = "backup.tar.gz"
+  source   = "pathnex-backup.tar.gz"
+}
+
+---
+
+## 3. Kubernetes — Disaster Recovery with Persistent Volumes
+
+apiVersion: apps/v1
+kind: StatefulSet
+
+metadata:
+  name: pathnex-statefulset
+
+spec:
+  serviceName: pathnex
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: pathnex
+
+  template:
+    metadata:
+      labels:
+        app: pathnex
+
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+
+          volumeMounts:
+            - name: web-content
+              mountPath: /usr/share/nginx/html
+
+  volumeClaimTemplates:
+    - metadata:
+        name: web-content
+
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+
+## 4. Jenkinsfile — Backup Strategy for Jenkins Workspace
+
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Backup') {
+            steps {
+                echo 'Backing up Jenkins workspace...'
+
+                sh '''
+                    tar -czvf /tmp/jenkins-backup.tar.gz \
+                    -C "$WORKSPACE" .
+                '''
+            }
+        }
+
+        stage('Restore') {
+            steps {
+                echo 'Restoring Jenkins workspace...'
+
+                sh '''
+                    mkdir -p "$WORKSPACE"
+
+                    tar -xzvf /tmp/jenkins-backup.tar.gz \
+                    -C "$WORKSPACE"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Backup and restore completed successfully!'
+        }
+
+        failure {
+            echo 'Backup or restore failed!'
+        }
+    }
+}
+
+---
+
+## 5. GitLab CI/CD — Backup and Restore Deployment Files
+
+stages:
+  - backup
+  - restore
+
+backup:
+  stage: backup
+
+  script:
+    - mkdir -p backup
+    - tar -czvf backup/backup.tar.gz kubernetes/deployment.yaml
+
+  artifacts:
+    paths:
+      - backup/backup.tar.gz
+    expire_in: 7 days
+
+restore:
+  stage: restore
+
+  needs:
+    - job: backup
+      artifacts: true
+
+  script:
+    - mkdir -p kubernetes
+    - tar -xzvf backup/backup.tar.gz -C .
+
+---
+
+## 6. Docker — Docker Compose
+
+services:
+
+  web:
+    image: nginx:latest
+
+    container_name: pathnex-nginx
+
+    ports:
+      - "80:80"
+
+    restart: always
+
+
