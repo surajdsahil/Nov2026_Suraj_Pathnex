@@ -1,0 +1,380 @@
+
+# Day 24 — Advanced Terraform Modules and CI/CD Pipeline Scaling
+
+## 1. Ansible — Deploy Docker Containers with Kubernetes Using Helm
+
+---
+- name: Deploy Microservices Using Helm
+  hosts: localhost
+  connection: local
+  become: yes
+  gather_facts: no
+
+  tasks:
+
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0755'
+      when: ansible_facts['os_family'] is defined
+
+    - name: Install Helm
+      command: bash /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Check Helm version
+      command: helm version
+      register: helm_version
+      changed_when: false
+
+    - name: Deploy or upgrade microservices
+      command: helm upgrade --install pathnex-app ./microservice-chart
+
+    - name: Verify Helm deployment
+      command: helm list
+      changed_when: false
+
+    - name: Check Kubernetes pods
+      command: kubectl get pods
+      changed_when: false
+
+---
+
+## 2. Terraform — Multi-Module Infrastructure with Outputs
+
+# Folder Structure:
+
+# terraform/
+#   main.tf
+#   variables.tf
+#   outputs.tf
+#   vpc/
+#     main.tf
+#     outputs.tf
+#   instance/
+#     main.tf
+#     variables.tf
+#     outputs.tf
+
+# -------------------------------
+# ROOT FILE: main.tf
+# -------------------------------
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# VPC Module
+module "pathnex_vpc" {
+  source = "./vpc"
+}
+
+# EC2 Instance Module
+module "pathnex_instance" {
+  source = "./instance"
+
+  vpc_id    = module.pathnex_vpc.vpc_id
+  subnet_id = module.pathnex_vpc.subnet_id
+}
+
+# -------------------------------
+# ROOT FILE: outputs.tf
+# -------------------------------
+
+output "vpc_id" {
+  value = module.pathnex_vpc.vpc_id
+}
+
+output "instance_id" {
+  value = module.pathnex_instance.instance_id
+}
+
+# -------------------------------
+# VPC MODULE: vpc/main.tf
+# -------------------------------
+
+resource "aws_vpc" "pathnex_vpc" {
+  cidr_block = "10.0.0.0/16"
+
+  tags = {
+    Name = "pathnex-vpc"
+  }
+}
+
+resource "aws_subnet" "pathnex_subnet" {
+  vpc_id                  = aws_vpc.pathnex_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "pathnex-subnet"
+  }
+}
+
+# -------------------------------
+# VPC MODULE: vpc/outputs.tf
+# -------------------------------
+
+output "vpc_id" {
+  value = aws_vpc.pathnex_vpc.id
+}
+
+output "subnet_id" {
+  value = aws_subnet.pathnex_subnet.id
+}
+
+# -------------------------------
+# INSTANCE MODULE: instance/variables.tf
+# -------------------------------
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "subnet_id" {
+  type = string
+}
+
+# -------------------------------
+# INSTANCE MODULE: instance/main.tf
+# -------------------------------
+
+resource "aws_security_group" "pathnex_sg" {
+  name   = "pathnex-security-group"
+  vpc_id = var.vpc_id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_instance" "pathnex_instance" {
+  ami           = "ami-0c02fb55956c7d316"
+  instance_type = "t2.micro"
+
+  subnet_id              = var.subnet_id
+  vpc_security_group_ids = [aws_security_group.pathnex_sg.id]
+
+  tags = {
+    Name = "pathnex-ec2"
+  }
+}
+
+# -------------------------------
+# INSTANCE MODULE: instance/outputs.tf
+# -------------------------------
+
+output "instance_id" {
+  value = aws_instance.pathnex_instance.id
+}
+
+# -------------------------------
+# TERRAFORM COMMANDS
+# -------------------------------
+
+# Initialize Terraform
+terraform init
+
+# Validate configuration
+terraform validate
+
+# Check execution plan
+terraform plan
+
+# Create infrastructure
+terraform apply
+
+# Destroy infrastructure
+terraform destroy
+
+---
+
+## 3. Kubernetes — Helm-Based Auto-Scaling Deployments
+
+# File: microservice-chart/templates/deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: pathnex-web-app
+
+spec:
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: pathnex-web-app
+
+  template:
+    metadata:
+      labels:
+        app: pathnex-web-app
+
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+
+          ports:
+            - containerPort: 80
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+---
+
+# File: microservice-chart/templates/hpa.yaml
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: pathnex-web-app-hpa
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pathnex-web-app
+
+  minReplicas: 2
+  maxReplicas: 10
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+
+# HELM COMMANDS
+
+# Install application
+helm install pathnex-app ./microservice-chart
+
+# Upgrade application
+helm upgrade pathnex-app ./microservice-chart
+
+# Check deployment
+kubectl get deployments
+
+# Check pods
+kubectl get pods
+
+# Check autoscaling
+kubectl get hpa
+
+# Uninstall application
+helm uninstall pathnex-app
+
+---
+
+## 4. Jenkinsfile — Scaling CI/CD Pipeline
+
+pipeline {
+
+    agent any
+
+    stages {
+
+        stage('Build') {
+            steps {
+                echo 'Building project...'
+
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Parallel Testing') {
+            parallel {
+
+                stage('Unit Testing') {
+                    steps {
+                        echo 'Running unit tests...'
+
+                        sh 'mvn test'
+                    }
+                }
+
+                stage('Code Validation') {
+                    steps {
+                        echo 'Validating project...'
+
+                        sh 'mvn validate'
+                    }
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying application...'
+
+                sh 'kubectl apply -f kubernetes/deployment.yaml'
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                echo 'Checking deployment status...'
+
+                sh 'kubectl rollout status deployment/pathnex-web-app'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'CI/CD pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'CI/CD pipeline failed!'
+        }
+    }
+}
+
+---
+
+## 5. Docker — Container Health Check
+
+# Dockerfile
+
+FROM nginx:alpine
+
+# Expose application port
+EXPOSE 80
+
+# Configure container health check
+HEALTHCHECK \
+    --interval=30s \
+    --timeout=5s \
+    --start-period=10s \
+    --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+
+# Start Nginx
+CMD ["nginx", "-g", "daemon off;"]
+
