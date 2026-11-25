@@ -1,0 +1,546 @@
+
+# Day 25 — Continuous Monitoring and Alerts
+
+. Ansible — Setup Prometheus Node Exporter
+
+---
+- name: Setup Prometheus Node Exporter
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    node_exporter_version: "1.8.2"
+    node_exporter_user: node_exporter
+
+  tasks:
+
+    - name: Create Node Exporter user
+      user:
+        name: "{{ node_exporter_user }}"
+        shell: /sbin/nologin
+        create_home: no
+        system: yes
+
+    - name: Download Node Exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: /tmp/node_exporter.tar.gz
+        mode: '0644'
+      when: ansible_architecture == "x86_64"
+
+    - name: Extract Node Exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp/
+        remote_src: yes
+      when: ansible_architecture == "x86_64"
+
+    - name: Copy Node Exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        remote_src: yes
+        mode: '0755'
+        owner: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_user }}"
+      when: ansible_architecture == "x86_64"
+
+    - name: Create Node Exporter systemd service
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Prometheus Node Exporter
+          After=network.target
+
+          [Service]
+          User=node_exporter
+          ExecStart=/usr/local/bin/node_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start and enable Node Exporter
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Verify Node Exporter
+      uri:
+        url: http://localhost:9100/metrics
+        status_code: 200
+
+---
+
+. Terraform — Create CloudWatch Alarms and SNS Alerts
+
+# AWS Provider
+provider "aws" {
+  region = "us-east-1"
+}
+
+# Existing EC2 Instance ID
+variable "instance_id" {
+  description = "EC2 instance ID to monitor"
+  type        = string
+}
+
+# Email Address for Alerts
+variable "alert_email" {
+  description = "Email address for CloudWatch notifications"
+  type        = string
+}
+
+# SNS Topic
+resource "aws_sns_topic" "pathnex_alerts" {
+  name = "pathnex-alerts"
+}
+
+# SNS Email Subscription
+resource "aws_sns_topic_subscription" "email_alert" {
+  topic_arn = aws_sns_topic.pathnex_alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
+# CloudWatch CPU Alarm
+resource "aws_cloudwatch_metric_alarm" "pathnex_cpu_alarm" {
+
+  alarm_name = "pathnex-cpu-utilization-high"
+
+  comparison_operator = "GreaterThanThreshold"
+
+  evaluation_periods = 2
+
+  datapoints_to_alarm = 2
+
+  metric_name = "CPUUtilization"
+
+  namespace = "AWS/EC2"
+
+  period = 300
+
+  statistic = "Average"
+
+  threshold = 80
+
+  alarm_description = "EC2 CPU utilization is above 80%"
+
+  dimensions = {
+    InstanceId = var.instance_id
+  }
+
+  alarm_actions = [
+    aws_sns_topic.pathnex_alerts.arn
+  ]
+
+  ok_actions = [
+    aws_sns_topic.pathnex_alerts.arn
+  ]
+
+  treat_missing_data = "notBreaching"
+}
+
+# Output SNS Topic ARN
+output "sns_topic_arn" {
+  value = aws_sns_topic.pathnex_alerts.arn
+}
+
+# Output CloudWatch Alarm Name
+output "cloudwatch_alarm_name" {
+  value = aws_cloudwatch_metric_alarm.pathnex_cpu_alarm.alarm_name
+}
+
+# Terraform Commands
+# terraform init
+# terraform validate
+# terraform plan
+# terraform apply
+
+---
+
+. Kubernetes — Setup Prometheus and Grafana
+
+# File: monitoring.yaml
+
+# PROMETHEUS CONFIGURATION
+
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: prometheus-config
+
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets:
+              - localhost:9090
+
+      - job_name: node-exporter
+        static_configs:
+          - targets:
+              - node-exporter:9100
+
+---
+
+# NODE EXPORTER DAEMONSET
+
+apiVersion: apps/v1
+kind: DaemonSet
+
+metadata:
+  name: node-exporter
+
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+
+    spec:
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.8.2
+
+          ports:
+            - containerPort: 9100
+              name: metrics
+
+          args:
+            - "--path.rootfs=/host"
+
+          volumeMounts:
+            - name: rootfs
+              mountPath: /host
+              readOnly: true
+              mountPropagation: HostToContainer
+
+      volumes:
+        - name: rootfs
+          hostPath:
+            path: /
+            type: Directory
+
+---
+
+# NODE EXPORTER SERVICE
+
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: node-exporter
+
+spec:
+  selector:
+    app: node-exporter
+
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100
+
+---
+
+# PROMETHEUS DEPLOYMENT
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: prometheus
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: prometheus
+
+  template:
+    metadata:
+      labels:
+        app: prometheus
+
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.0.1
+
+          ports:
+            - containerPort: 9090
+
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus
+
+      volumes:
+        - name: prometheus-config
+          configMap:
+            name: prometheus-config
+
+---
+
+# PROMETHEUS SERVICE
+
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: prometheus
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: prometheus
+
+  ports:
+    - port: 9090
+      targetPort: 9090
+
+---
+
+
+# GRAFANA DEPLOYMENT
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: grafana
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: grafana
+
+  template:
+    metadata:
+      labels:
+        app: grafana
+
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.4.0
+
+          ports:
+            - containerPort: 3000
+
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+
+---
+
+# GRAFANA SERVICE
+
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: grafana
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: grafana
+
+  ports:
+    - port: 3000
+      targetPort: 3000
+
+---
+
+# KUBERNETES COMMANDS
+
+# Deploy monitoring resources
+kubectl apply -f monitoring.yaml
+
+# Check deployments
+kubectl get deployments
+
+# Check pods
+kubectl get pods
+
+# Check services
+kubectl get services
+
+# Check Node Exporter
+kubectl get daemonset node-exporter
+
+# Open Prometheus Dashboard
+kubectl port-forward svc/prometheus 9090:9090
+
+# Open Grafana Dashboard (use another terminal)
+kubectl port-forward svc/grafana 3000:3000
+
+# Prometheus URL:
+# http://localhost:9090
+
+# Grafana URL:
+# http://localhost:3000
+
+# Default Grafana login:
+# Username: admin
+# Password: admin
+# Change the default password after first login.
+
+---
+
+. Jenkinsfile — Continuous Monitoring and Alerts
+
+pipeline {
+
+    agent any
+
+    stages {
+
+        stage('Monitor') {
+            steps {
+
+                echo 'Checking CloudWatch CPU Alarm...'
+
+                sh '''
+                    aws cloudwatch describe-alarms \
+                    --alarm-names pathnex-cpu-utilization-high \
+                    --query "MetricAlarms[0].StateValue" \
+                    --output text
+                '''
+            }
+        }
+
+        stage('Test') {
+            steps {
+
+                echo 'Running application tests...'
+
+                sh 'mvn test'
+            }
+        }
+
+        stage('Deployment Status') {
+            steps {
+
+                echo 'Checking Kubernetes deployment...'
+
+                sh '''
+                    kubectl get deployments
+                    kubectl get pods
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo 'Monitoring and CI pipeline completed!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check monitoring and application logs!'
+        }
+    }
+}
+
+---
+
+. GitLab CI/CD — Monitoring and Alerting
+
+stages:
+  - monitor
+  - test
+  - verify
+  
+# MONITORING STAGE
+
+monitor:
+  stage: monitor
+
+  script:
+    - |
+      aws cloudwatch describe-alarms \
+        --alarm-names pathnex-cpu-utilization-high \
+        --query "MetricAlarms[0].StateValue" \
+        --output text
+
+
+# TEST STAGE
+
+test:
+  stage: test
+
+  script:
+    - echo "Running application tests..."
+    - mvn test
+
+
+# VERIFICATION STAGE
+
+
+verify:
+  stage: verify
+
+  script:
+    - kubectl get deployments
+    - kubectl get pods
+
+---
+
+#  Docker — .dockerignore File
+
+# Ignore Node Modules
+node_modules/
+
+# Ignore Git Files
+.git/
+.gitignore
+
+# Ignore Temporary Files
+temp/
+tmp/
+*.tmp
+
+# Ignore Log Files
+*.log
+logs/
+
+# Ignore Environment Files
+.env
+.env.*
+
+# Ignore Build Output
+target/
+dist/
+build/
+
+# Ignore IDE Files
+.idea/
+.vscode/
+
+# Ignore OS Files
+.DS_Store
+Thumbs.db
+
+# Ignore Documentation
+README.md
+
+
