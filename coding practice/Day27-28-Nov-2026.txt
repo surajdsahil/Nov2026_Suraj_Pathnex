@@ -1,0 +1,138 @@
+
+# ANSIBLE — DEPLOY SERVERLESS AWS LAMBDA FUNCTION
+
+- name: Deploy Serverless Lambda Function
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    - name: Create Lambda deployment package
+      command: zip -r lambda.zip lambda/
+      args:
+        chdir: "{{ playbook_dir }}"
+
+    - name: Deploy Lambda function
+      command: >
+        aws lambda create-function
+        --function-name pathnex-lambda
+        --runtime nodejs22.x
+        --role arn:aws:iam::123456789012:role/lambda-role
+        --handler index.handler
+        --zip-file fileb://lambda.zip
+      args:
+        chdir: "{{ playbook_dir }}"
+      register: lambda_result
+      failed_when:
+        - lambda_result.rc != 0
+        - "'ResourceConflictException' not in lambda_result.stderr"
+
+    - name: Update Lambda code if function already exists
+      command: >
+        aws lambda update-function-code
+        --function-name pathnex-lambda
+        --zip-file fileb://lambda.zip
+      args:
+        chdir: "{{ playbook_dir }}"
+      when: "'ResourceConflictException' in lambda_result.stderr"
+
+
+# TERRAFORM — CREATE DYNAMODB TABLE
+
+resource "aws_dynamodb_table" "pathnex_table" {
+  name         = "pathnex-table"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  tags = {
+    Name        = "pathnex-table"
+    Environment = "production"
+  }
+}
+
+
+# KUBERNETES — DEPLOY SERVERLESS FUNCTION USING KUBELESS
+
+apiVersion: kubeless.io/v1beta1
+kind: Function
+metadata:
+  name: pathnex-lambda
+  namespace: default
+spec:
+  runtime: nodejs18
+  handler: index.handler
+  function: |
+    module.exports = {
+      handler: async function(event, context) {
+        return {
+          statusCode: 200,
+          body: "Hello Pathnex"
+        };
+      }
+    };
+
+
+# JENKINSFILE — LAMBDA FUNCTION DEPLOYMENT PIPELINE
+
+pipeline {
+    agent any
+
+    environment {
+        FUNCTION_NAME = 'pathnex-lambda'
+        AWS_DEFAULT_REGION = 'us-east-1'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                echo 'Building Lambda function package...'
+                sh 'cd lambda && zip -r ../lambda.zip .'
+            }
+        }
+
+        stage('Deploy to Lambda') {
+            steps {
+                sh '''
+                    aws lambda update-function-code \
+                      --function-name "$FUNCTION_NAME" \
+                      --zip-file fileb://lambda.zip
+
+                    aws lambda wait function-updated \
+                      --function-name "$FUNCTION_NAME"
+                '''
+            }
+        }
+    }
+}
+
+
+# DOCKER — EXECUTE COMMANDS AND MONITOR RESOURCES
+
+# Open a shell inside a running container
+docker exec -it pathnex-nginx sh
+
+# Display live container resource usage
+docker stats
+
+# Display resource usage for all running containers
+docker stats --all
+
+# Run Nginx with memory and CPU limits
+docker run -d \
+  --name pathnex-limited-nginx \
+  --memory="512m" \
+  --cpus="1.0" \
+  -p 8080:80 \
+  nginx:latest
+
+# Check container status
+docker ps
+
+# Inspect container resource configuration
+docker inspect pathnex-limited-nginx
+
