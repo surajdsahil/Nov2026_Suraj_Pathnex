@@ -1,0 +1,197 @@
+
+# ANSIBLE — SSH KEY-BASED AUTHENTICATION
+
+- name: Implement SSH Key Authentication
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Create SSH directory
+      file:
+        path: /home/user/.ssh
+        state: directory
+        owner: user
+        group: user
+        mode: '0700'
+
+    - name: Generate SSH key pair
+      community.crypto.openssh_keypair:
+        path: /home/user/.ssh/id_rsa
+        type: rsa
+        size: 4096
+        owner: user
+        group: user
+        mode: '0600'
+      become_user: user
+
+    - name: Add public key to authorized_keys
+      authorized_key:
+        user: user
+        state: present
+        key: "{{ lookup('file', '/home/user/.ssh/id_rsa.pub') }}"
+      become: yes
+
+
+# TERRAFORM — ENABLE AWS VPC FLOW LOGS
+
+resource "aws_cloudwatch_log_group" "pathnex_flow_logs_group" {
+  name              = "pathnex-flow-logs"
+  retention_in_days = 30
+}
+
+resource "aws_iam_role" "flow_logs_role" {
+  name = "pathnex-flow-logs-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "vpc-flow-logs.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "flow_logs_policy" {
+  name = "pathnex-flow-logs-policy"
+  role = aws_iam_role.flow_logs_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ]
+      Resource = "${aws_cloudwatch_log_group.pathnex_flow_logs_group.arn}:*"
+    }]
+  })
+}
+
+resource "aws_flow_log" "pathnex_flow_log" {
+  log_destination      = aws_cloudwatch_log_group.pathnex_flow_logs_group.arn
+  log_destination_type = "cloud-watch-logs"
+  traffic_type         = "ALL"
+  vpc_id               = aws_vpc.pathnex_vpc.id
+  iam_role_arn         = aws_iam_role.flow_logs_role.arn
+}
+
+
+# KUBERNETES — NETWORK POLICIES FOR SECURITY
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pathnex-web-policy
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: pathnex-web-app
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: pathnex-api
+
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pathnex-database
+
+
+# JENKINSFILE — SECURE PIPELINE WITH SECRETS
+
+pipeline {
+    agent any
+
+    environment {
+        AWS_ACCESS_KEY_ID = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+        AWS_DEFAULT_REGION = 'us-east-1'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                script {
+                    docker.build('pathnex-web-app')
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying to AWS EC2...'
+
+                sh '''
+                    aws ec2 run-instances \
+                      --image-id "$AMI_ID" \
+                      --count 1 \
+                      --instance-type t2.micro
+                '''
+            }
+        }
+    }
+}
+
+
+# GITLAB CI/CD — SECURE DEPLOYMENT WITH CI/CD VARIABLES
+
+stages:
+  - build
+  - deploy
+
+variables:
+  AWS_DEFAULT_REGION: "us-east-1"
+  IMAGE_TAG: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+build:
+  stage: build
+  script:
+    - docker build -t "$IMAGE_TAG" .
+
+deploy:
+  stage: deploy
+  script:
+    - aws sts get-caller-identity
+    - aws ec2 run-instances
+        --image-id "$AMI_ID"
+        --count 1
+        --instance-type t2.micro
+  environment:
+    name: production
+
+
+# DOCKER — LOGS AND INSPECT
+
+# View container logs
+docker logs pathnex-nginx
+
+# Follow logs in real time
+docker logs -f pathnex-nginx
+
+# Display the last 100 log lines
+docker logs --tail 100 pathnex-nginx
+
+# Inspect container configuration
+docker inspect pathnex-nginx
+
+# Display container resource usage
+docker stats pathnex-nginx
+
+# Display container processes
+docker top pathnex-nginx
+
